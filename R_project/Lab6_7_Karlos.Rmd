@@ -1,0 +1,472 @@
+---
+title: "GDAA1001 Lab 6 and 7"
+author: "Karlos Lao"
+date: "2023-11-13"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+### Lab 6 & 7
+This lab will build a model that predicts country GDP per capita values as either "High" or "Low", using a selection of the given predictor variables.
+
+```{r message=F, warning = F}
+library(tidyverse)
+library(sf)
+library(caret)
+library(likert)
+library(grid)
+library(gridExtra)
+library(ggpubr)
+```
+
+
+### Data Preparation
+```{r}
+# Set working directory path
+setwd("C:\\Users\\kailo\\OneDrive - Nova Scotia Community College\\GDAA1001\\Lab6_7")
+
+# Load Data
+data <- st_read("world.shp")
+
+# Create a new column "GDP_High_low" that labels countries with GDP_CAP values greater than or equal to the median of that variable as High, and less than the median of that variable as Low.
+# This will be used as the target variable
+data <- data %>%
+  mutate(GDP_High_Low = ifelse(GDP_CAP >= median(GDP_CAP), "High", "Low"))
+
+# Drop the 'geometry' column
+data <- st_drop_geometry(data)
+# Quickly inspect the data types
+str(data)
+```
+### Select 10 predictors that will serve as independent variables.
+1. "DENSITY" ("POP_CNTRY"/"SQKM_CNTRY"): Population Density (high population density tend to reflects high urbanization rate and productivity due to "economies of agglomeration", in most cases it may lead to lower gdp per capita).
+
+2. "URBAN": Number of People living in cities, % (urbanization is usually a strong indicator for economic development as people move to cities for better work opportunities).
+
+3. "LIFEEXPF"：Average Female Life Expectancy (life expectancy usually reflects a country's quality of living and state of healthcare, which are also correlated with GDP and national funding). 
+
+4. "LIFEEXPM"： Average Male Life Expectancy (life expectancy usually reflects a country's quality of living and state of healthcare, which are also correlated with GDP and national funding).
+
+5. "LITERACY": Literacy Rate (literacy is linked to education, which is a key driver of economic development and productivity.)
+
+6. "BIRTH_RT": Birth Rate (high birth rates typically occur in under-developed or developing nations where GDP is high but GDP per capital is low).  
+
+7. "DEATH_RT": Death Rate (death rate often reflects the state of the nation's healthcare system and crime rate, which also influences GDP through reducing productivity). 
+
+8. "FFERTILTY": Fertility Rate (fertility rate often reflects the level of education in a country, developed nations tend to have low fertility rate).
+
+9. "POP_INCR": Population Growth Rate (high population growth may leads to low GDP per capita given finite resources and stagnant GDP growth, which usually occurs in developing countries).
+
+10. "BABYMORT": Infant Mortality (high infant mortality usually indicate low quality of living and ineffective healthcare system, which indirectly affect productivity and overall economic well-being). 
+
+### Subset Data by the Selected Predictor Variables
+```{r}
+# There's no DENSITY variable in the dataset
+# Need to create the pop.density variable (population per sqkm)
+data$DENSITY <- data$POP_CNTRY / data$SQKM_CNTRY
+
+# subset the dataset with the selected predictor variables
+data_sub <- data %>% 
+  select("DENSITY", "URBAN", "LIFEEXPF", "LIFEEXPM", "LITERACY", "BIRTH_RT",
+         "DEATH_RT", "FERTILTY", "POP_INCR", "BABYMORT", "GDP_High_Low")
+
+
+# drop observations/ remove countries with missing data (0 = NoData in this case)
+data_filtered <- data_sub %>%
+  drop_na() %>%
+  filter(`DENSITY` != 0, `URBAN`!=0, `LIFEEXPF`!=0, `LIFEEXPM`!=0, `LITERACY`!=0, 
+         `BIRTH_RT`!=0, `DEATH_RT`!=0, `FERTILTY`!=0, `POP_INCR`!=0, `BABYMORT`!=0,)
+```
+
+### Rescale Data by Z-Transformation
+```{r}
+# str(data_filtered) 
+# columns to be scaled are 1:10, 
+# column 11 is "GDP_High_Low" that doesn't need to be scaled
+
+data_z <- data_filtered %>%
+  mutate(across(.cols = 1:10, ~ as.vector(scale(.)), .names = "scaled_{.col}")) %>%
+  select(c(11,12:21))
+
+# convert "GDP_High_Low from string to factor type
+data_z$GDP_High_Low <- as.factor(data_z$GDP_High_Low)
+
+# check the result
+str(data_z)
+```
+
+### Check Value Distribution of the Target Variable ("GDP_High_Low")
+```{r}
+# get actual counts of "high" and "low" in the observations
+tapply(data_z$GDP_High_Low, data_z$GDP_High_Low, length)
+# There are 3 extra counts of "Low", we need to balance the class
+
+# Evenly balance the two classes to 50 observations each
+df1 <- data_z %>% 
+  filter(GDP_High_Low == "High") %>% 
+  sample_n(50)
+
+df2 <- data_z %>% 
+  filter(GDP_High_Low == "Low") %>% 
+  sample_n(50)
+
+df <- bind_rows(df1, df2, .id = NULL)
+
+# double check the result to make sure they are balanced
+tapply(df$GDP_High_Low, df$GDP_High_Low, length)
+
+# rename the variables
+names(df) <- c("GDP_High_Low", "DENSITY", "URBAN", 
+                   "LIFEEXPF", "LIFEEXPM", "LITERACY", "BIRTH_RT", 
+                   "DEATH_RT", "FERTILTY", "POP_INCR", "BABYMORT")
+```
+### Create Training and Test Datasets with 75/25 split
+```{r}
+# create training and validation data
+inTraining <- createDataPartition(df$GDP_High_Low, p=0.75, list=FALSE)
+training <- df[inTraining,]
+validation <- df[-inTraining,]
+```
+
+### Set Up Modelling Parameters
+```{r}
+# run algorithms 
+# do a 10-fold cross validation to avoid data overfitting, and repeat 10 times to reduce randomness in the results
+control <- trainControl(method="repeatedcv", number=10, repeats=10)
+metric <- "Accuracy"
+```
+
+### Training Models
+ - Linear Discriminant Analysis (lda)
+ - Classification & Regression Trees (cart)
+ - k-Nearest Neighbors (knn)
+ - Support Vector Machines (svm)
+ - Logistic Regression (glm)
+
+
+### Linear Discriminant Analysis (lda)
+```{r}
+set.seed(123)
+fit.lda <- train(GDP_High_Low~., data=training, method="lda", metric=metric, trControl=control)
+predictions <- predict(fit.lda, validation)
+
+cm <- confusionMatrix(predictions, as.factor(validation$GDP_High_Low))
+cm
+```
+
+### Classification and Regression Trees (cart)
+```{r}
+fit.cart <- train(GDP_High_Low~., data=training, method="rpart", metric=metric, trControl=control)
+predictions <- predict(fit.cart, validation)
+
+cm1 <- confusionMatrix(predictions, as.factor(validation$GDP_High_Low))
+cm1
+```
+### k-Nearest Neighbors (knn)
+
+```{r}
+set.seed(123)
+fit.knn <- train(GDP_High_Low~., data=training, method="knn", metric=metric, trControl=control)
+predictions <- predict(fit.knn, validation)
+
+cm2 <- confusionMatrix(predictions, as.factor(validation$GDP_High_Low))
+cm2
+```
+### Support Vector Machine (svm)
+```{r}
+set.seed(123)
+fit.svm <- train(GDP_High_Low~., data=training, method="svmRadial", metric=metric, trControl=control)
+predictions <- predict(fit.svm, validation)
+
+cm3 <- confusionMatrix(predictions, as.factor(validation$GDP_High_Low))
+cm3
+```
+
+### Logistic Regression (glm)
+```{r}
+
+# Received 
+"Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred"
+# switching over to the "glmnet" package instead of "glm"
+library(glmnet)
+
+# Logistic Regression
+set.seed(123)
+fit.glm <- train(GDP_High_Low~., data=training, method = "glmnet", metric=metric,trControl=control)
+predictions <- predict(fit.glm, validation)
+
+cm4 <- confusionMatrix(predictions,
+                       as.factor(validation$GDP_High_Low))
+cm4
+```
+
+### Assessing Model Accuracies
+Looking solely at classification accuracy, it appears that "knn" perform the best (highest mean accuracy: 0.86 and mean kappa value: 0.72).
+ 
+```{r}
+# summary of results
+results <- resamples(list(lda=fit.lda, cart=fit.cart, knn=fit.knn, svm=fit.svm, glm=fit.glm))
+summary(results)
+```
+### Plot Model Accuracies
+```{r}
+results_df <- as.data.frame(results)
+
+results_tidy <- results_df %>% 
+  pivot_longer(names_to = "Model", values_to = "Accuracy", -Resample) %>% 
+  group_by(Model) %>% 
+  summarise(Mean_Accuracy = mean(Accuracy))
+
+mean_acc <- results_tidy %>% 
+  ggplot(aes(x=fct_reorder(Model, Mean_Accuracy), y=Mean_Accuracy))+
+  geom_bar(stat = "identity")+
+  coord_flip()+
+  xlab("Model")+
+  ylab("Mean Accuracy")+
+  theme(text = element_text(size = 20),
+        title = element_text(size = 14))
+
+mean_acc
+```
+
+### Create a Confusion Matrix for the Best Model (glm)
+```{r}
+
+#cm4 is the confusion matrix for 'glm'
+cm_4d <- as.data.frame(cm4$table)
+cm_4d$diag <- cm_4d$Prediction == cm_4d$Reference # Get the Diagonal
+cm_4d$ndiag <- cm_4d$Prediction != cm_4d$Reference # Off Diagonal     
+cm_4d[cm_4d == 0] <- NA # Replace 0 with NA for white tiles
+cm_4d$Reference <-  reverse.levels(cm_4d$Reference) # diagonal starts at top left
+cm_4d$ref_freq <- cm_4d$Freq * ifelse(is.na(cm_4d$diag),-1,1)
+
+plt1 <-  ggplot(data = cm_4d, aes(x = Prediction , y =  Reference, fill = Freq))+
+  scale_x_discrete(position = "top") +
+  geom_tile( data = cm_4d,aes(fill = ref_freq)) +
+  scale_fill_gradient2(guide = FALSE ,low="red3",high="orchid4", midpoint = 0,na.value = 'white') +
+  geom_text(aes(label = Freq), color = 'black', size = 3)+
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = "none",
+        panel.border = element_blank(),
+        plot.background = element_blank(),
+        axis.line = element_blank(),
+  )
+plt1
+
+```
+
+
+### Create a Confusion Matrix for the Worst Model (cart)
+```{r}
+
+#cm1 is the confusion matrix for 'cart'
+cm1_d <- as.data.frame(cm1$table)
+cm1_d$diag <- cm1_d$Prediction == cm1_d$Reference
+cm1_d$ndiag <- cm1_d$Prediction != cm1_d$Reference   
+cm1_d[cm1_d == 0] <- NA
+cm1_d$Reference <-  reverse.levels(cm1_d$Reference)
+cm1_d$ref_freq <- cm1_d$Freq * ifelse(is.na(cm1_d$diag),-1,1)
+
+plt2 <-  ggplot(data = cm1_d, aes(x = Prediction , y =  Reference, fill = Freq))+
+  scale_x_discrete(position = "top") +
+  geom_tile( data = cm1_d,aes(fill = ref_freq)) +
+  scale_fill_gradient2(guide = FALSE ,low="red3",high="orchid4", midpoint = 0,na.value = 'white') +
+  geom_text(aes(label = Freq), color = 'black', size = 3)+
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = "none",
+        panel.border = element_blank(),
+        plot.background = element_blank(),
+        axis.line = element_blank(),
+  )
+plt2
+
+```
+
+### Determine Variable Importance
+```{r}
+
+# use varImp to get variable importance into a data.frame
+importance1 <- varImp(fit.lda)
+importance2 <- varImp(fit.cart)
+importance3 <- varImp(fit.knn)
+importance4 <- varImp(fit.svm)
+importance5 <- varImp(fit.glm)
+
+# Check structure of the data.frames
+str(importance1)
+str(importance2)
+str(importance3)
+str(importance4)
+str(importance5)
+
+# Extract importance 
+imp1 <- importance1$importance 
+imp2 <- importance2$importance
+imp3 <- importance3$importance
+imp4 <- importance4$importance
+imp5 <- importance5$importance
+```
+
+
+### Plot the Variable Importance by Model
+```{r}
+
+# 'lda'
+p1 <- imp1 %>% 
+  mutate(Predictor = rownames(imp1)) %>% 
+  pivot_longer(names_to = "GDP_Per_Capita", values_to = "Importance", -Predictor) %>%
+  ggplot(aes(x=Predictor, y=Importance))+
+  geom_segment(aes(x=Predictor, xend=Predictor, y=0, yend=Importance), color="skyblue") +
+  geom_point(color="blue", size=4, alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+
+  ylab("Linear Discriminant Analysis")+
+  xlab("")
+
+# 'cart'
+p2 <- imp2 %>% 
+  mutate(Predictor = rownames(imp2)) %>% 
+  pivot_longer(names_to = "GDP_Per_Capita", values_to = "Importance", -Predictor) %>%
+  ggplot(aes(x=Predictor, y=Importance))+
+  geom_segment(aes(x=Predictor, xend=Predictor, y=0, yend=Importance), color="skyblue") +
+  geom_point(color="blue", size=4, alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+
+  ylab("Classification & Regression Tree")+
+  xlab("")
+
+# 'knn'
+p3 <- imp3 %>% 
+  mutate(Predictor = rownames(imp3)) %>% 
+  pivot_longer(names_to = "GDP_Per_Capita", values_to = "Importance", -Predictor) %>%
+  ggplot(aes(x=Predictor, y=Importance))+
+  geom_segment(aes(x=Predictor, xend=Predictor, y=0, yend=Importance), color="skyblue") +
+  geom_point(color="blue", size=4, alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+
+  ylab("k-Nearest Neighbors")
+
+# 'svm'
+p4 <- imp4 %>% 
+  mutate(Predictor = rownames(imp4)) %>% 
+  pivot_longer(names_to = "GDP_Per_Capita", values_to = "Importance", -Predictor) %>%
+  ggplot(aes(x=Predictor, y=Importance))+
+  geom_segment(aes(x=Predictor, xend=Predictor, y=0, yend=Importance), color="skyblue") +
+  geom_point(color="blue", size=4, alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+
+  ylab("Support Vector Machine")+
+  xlab("")
+
+# 'glm'
+p5 <- imp5 %>% 
+  mutate(Predictor = rownames(imp5)) %>% 
+  pivot_longer(names_to = "GDP_Per_Capita", values_to = "Importance", -Predictor) %>%
+  ggplot(aes(x=Predictor, y=Importance))+
+  geom_segment(aes(x=Predictor, xend=Predictor, y=0, yend=Importance), color="skyblue") +
+  geom_point(color="blue", size=4, alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+
+  ylab("Logistic Regression")+
+  xlab("")
+```
+
+### Plot the Variable Importance Individually
+```{r}
+p1
+p2
+p3
+p4
+p5
+# p3 &p4 appear to be the same
+```
+# Plot them all on a single lollipop-chart
+```{r}
+# create the plot
+plot_importance <- ggarrange(p1, p2, p3, p4, p5, ncol = 1, heights = c(4, 4, 4, 4, 4), width = 6) +
+  theme(text = element_text(size = 12)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  theme(plot.margin = margin(2, 2, 2, 2))
+
+# save the plot to a file
+ggsave("plot_importance.png", plot_importance, height = 10, width = 8)
+
+# open the saved image in a viewer
+png_file <- "plot_importance.png"
+browseURL(png_file)
+
+```
+### Get Average Variable Importance for Each Predictor Across All Models
+```{r}
+# Get average
+average_importance <- rowMeans(cbind(imp1, imp2, imp3, imp4, imp5))
+
+# Create a data frame for plotting
+importance_df <- data.frame(Predictor = names(average_importance), Importance = average_importance)
+
+# Sort the data frame by importance score in descending order
+importance_df <- importance_df[order(importance_df$Importance, decreasing = TRUE), ]
+
+# Create the plot
+library(ggplot2)
+ggplot(importance_df, aes(x = reorder(Predictor, -Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "purple") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Predictor", y = "Average Importance Score") +
+  ggtitle("Overall Predictor Importance Across All Models")
+```
+
+### Intrepreting the Results
+The four most important predictors are "average female life expectancy", "percent of people living in cities", "birth rate", and "literacy" (% of people who read). We can conclude that these four factors are highly correlated to gdp per capita.
+
+The least effective predictors - "population density" and "death rate" have been contributing noise to the models and reducing accuracy. It's possible that the data quality of these two variables are poor and/or their data distribution is heavily skewed. We can perhaps remove these two to enhance our models, but there seems to be no other alternative variable that we can use to substitute because they all have too many rows with no data (value = 0). That is, if we swap out the two predictors, we might need to remove more observations (i.e. countries) to ensure we have quality data that are not 0. In that case, we will be reducing the sample size again, and the result of the models can be inflated by training it with a small dataset.
+
+If there are more variables and more consistent data, based on the correlation matrix shown below, I would also be cautious using "Birth Rate" and "Fertility", "Population Growth Rate" and "Birth Rate", "Avg Life Expectancy of Males" and "Avg Life Expectancy of Females" together because they are highly correlated to each other in a positive trend (high birth rate -> high fertility). 
+
+This collinearity test should have been done in the variable selection process, but I tried to keep as many observations as possible with the hard limit of selecting ten "reasonable" predictors. At this stage, it's been determined that our sample size is too small and it's not possible to further improve accuracy of the models with alternative variables. 
+
+
+### Check for Collinearity with a Correlation Matrix
+```{r}
+# source: http://www.sthda.com/english/wiki/ggcorrplot-visualization-of-a-correlation-matrix-using-ggplot2
+library(ggcorrplot)
+test_df <- df %>% 
+  select("DENSITY", "URBAN", "LIFEEXPF", "LIFEEXPM", "LITERACY", "BIRTH_RT",
+         "DEATH_RT", "FERTILTY", "POP_INCR", "BABYMORT")
+
+# compute a matrix of correlation p-values
+p.mat <- cor_pmat(test_df)
+
+# compute a correlation matrix
+corr <- round(cor(test_df),1)
+
+# Argument p.mat indicates the no significant correlation coefficient
+# Visualize the Correlation Matrix
+ggcorrplot(corr, hc.order = TRUE, type = "lower",lab = TRUE, p.mat= p.mat)
+
+```
